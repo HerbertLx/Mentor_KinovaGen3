@@ -3,28 +3,47 @@ import cv2
 import numpy as np
 import torch
 from dm_control import suite
-# 强制使用 egl 可能会导致本地弹窗失败，如果在有显示器的 Ubuntu 上，可以注释掉这行或改为 'glfw'
+# 强制使用 glfw
 os.environ['MUJOCO_GL'] = 'glfw' 
 
 from stable_baselines3 import SAC
+from stable_baselines3.common.callbacks import BaseCallback
 import gymnasium as gym
 from shimmy.dm_control_compatibility import DmControlCompatibilityV0
 
+# 回调函数：用于实时打印训练指标
+class InfoCallback(BaseCallback):
+    def __init__(self, verbose=0):
+        super(InfoCallback, self).__init__(verbose)
+
+    def _on_step(self) -> bool:
+        if self.n_calls % 100 == 0:
+            # 从 SB3 内部记录器提取数据
+            logs = self.model.logger.name_to_value
+            actor_loss = logs.get("train/actor_loss", 0)
+            critic_loss = logs.get("train/loss", 0) 
+            ent_coeff = logs.get("train/ent_coeff", 0)
+            
+            print(f"Step: {self.num_timesteps} | Actor Loss: {actor_loss:.4f} | Critic Loss: {critic_loss:.4f} | Alpha: {ent_coeff:.4f}")
+        return True
+
 class Workspace:
     def __init__(self):
-        # 1. 环境初始化 (仿 MENTOR 风格)
         self.domain_name = "dog"
         self.task_name = "walk"
         
-        # 加载原生的 DMC 环境
-        raw_env = suite.load(domain_name=self.domain_name, task_name=self.task_name)
+        # 强制检查 GPU
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        print(f"--- 正在使用设备: {self.device} ---")
+
+        # 保存原生环境，以便后续直接操作底层 physics
+        self.raw_env = suite.load(domain_name=self.domain_name, task_name=self.task_name)
         
-        # 包装成 Gymnasium 接口，方便 SAC 使用
-        self.env = DmControlCompatibilityV0(raw_env, render_mode="rgb_array")
+        # 包装环境
+        self.env = DmControlCompatibilityV0(self.raw_env, render_mode="rgb_array")
         self.env = gym.wrappers.RescaleAction(self.env, min_action=-1, max_action=1)
         
-        # 2. 算法初始化
-        # Dog 任务动作空间 38 维，属于极高维度，SAC 需要较大的网络
+        # 38 维动作空间，使用三层 512 的深度网络
         policy_kwargs = dict(net_arch=[512, 512, 512]) 
         
         self.agent = SAC(
@@ -38,61 +57,67 @@ class Workspace:
             gamma=0.99,
             train_freq=1,
             gradient_steps=1,
-            verbose=1
+            verbose=0, 
+            device=self.device
         )
 
         self.global_step = 0
-        print(f"成功加载任务: {self.domain_name}_{self.task_name}")
-        print(f"动作空间: {self.env.action_space}")
+        self.info_callback = InfoCallback()
+        self.info_callback.init_callback(self.agent)
 
-    def render_live(self, obs):
-        """实时渲染直播函数"""
-        # 获取环境渲染图
-        frame = self.env.render() # 获取的是 RGB 阵列
-        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR) # OpenCV 需要 BGR
+    def render_live(self):
+        """
+        修正后的渲染函数：通过物理引擎直接渲染大窗口
+        """
+        # 直接调用物理引擎渲染，不受 Gymnasium 接口限制
+        # height/width 设为你想要的大小
+        # camera_id=0 为全局视角，camera_id=1 通常是追踪视角
+        frame = self.raw_env.physics.render(height=720, width=1280, camera_id=0)
         
-        # 在画面上打上当前步数的标签
-        cv2.putText(frame, f"Step: {self.global_step}", (10, 30), 
-                    cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 0), 2)
+        # 转换 BGR 用于 OpenCV
+        frame = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
         
-        cv2.imshow("Dog Walk Live Training", frame)
-        # 等待 1ms 刷新窗口，按 'q' 可以退出渲染（不停止训练）
+        # 画面叠加信息
+        cv2.putText(frame, f"Step: {self.global_step}", (40, 60), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 1.5, (0, 255, 0), 3)
+        
+        # 显示窗口
+        cv2.imshow("Dog Walk - GPU Training Live", frame)
+        
         if cv2.waitKey(1) & 0xFF == ord('q'):
-            pass
+            exit()
 
     def train(self, total_steps=1000000):
         print("开始训练...")
         obs, _ = self.env.reset()
-        for key in obs:
-            print(f"obs['{key}'].shape = {obs[key].shape}")
-        # exit()
+        episode_reward = 0
         
         for _ in range(total_steps):
-            # 1. 代理采取动作
             action, _ = self.agent.predict(obs, deterministic=False)
-            
-            # 2. 与环境交互
             new_obs, reward, terminated, truncated, info = self.env.step(action)
+            episode_reward += reward
             
-            # 3. 存储经验并学习
-            self.agent.learn(total_timesteps=1, reset_num_timesteps=False)
+            # 学习一步
+            self.agent.learn(total_timesteps=1, reset_num_timesteps=False, callback=self.info_callback)
             
-            # 4. 实时直播：每步都渲染或者每隔几步渲染一次（为了不拖慢训练速度）
-            if self.global_step % 2 == 0:
-                self.render_live(obs)
+            # 控制直播频率：每 500 步循环中，显示最后 100 步
+            if self.global_step % 500 > 400:
+                self.render_live()
             
             obs = new_obs
             self.global_step += 1
             
-            if terminated or truncated:
+            # 当回合结束或强制 500 步重置（增加观察样本）
+            if terminated or truncated or (self.global_step % 500 == 0):
+                print(f"--- Episode End | Reward: {episode_reward:.2f} | Total Steps: {self.global_step} ---")
                 obs, _ = self.env.reset()
+                episode_reward = 0
 
         cv2.destroyAllWindows()
 
 if __name__ == "__main__":
     workspace = Workspace()
     workspace.train()
-
 
 """
 DMC Dog Walk 任务观测空间 (Observation Space) 详解：
