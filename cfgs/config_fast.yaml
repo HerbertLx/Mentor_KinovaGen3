@@ -16,7 +16,7 @@ eval_every_frames: 100000
 num_eval_episodes: 10
 # snapshot
 save_snapshot: True
-save_interval: 10000
+save_interval: 100000
 load_from_id: false
 load_id: 0
 # wandb
