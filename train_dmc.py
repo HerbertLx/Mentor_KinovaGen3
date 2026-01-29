@@ -243,7 +243,7 @@ class Workspace:
             self.__dict__[k] = v
 
 
-@hydra.main(config_path='cfgs', config_name='config')
+@hydra.main(config_path='cfgs', config_name='config_fast')
 def main(cfgs):
     from train_dmc import Workspace as W
     root_dir = Path.cwd()
