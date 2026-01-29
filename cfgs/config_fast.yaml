@@ -10,9 +10,9 @@ action_repeat: 2
 discount: 0.99
 # train settings
 num_seed_frames: 4000
-update_every_steps: 2
+update_every_steps: 8
 # eval
-eval_every_frames: 10000
+eval_every_frames: 100000
 num_eval_episodes: 10
 # snapshot
 save_snapshot: False
@@ -25,7 +25,7 @@ use_wandb: true
 replay_buffer_size: 1000000
 replay_buffer_num_workers: 4
 nstep: 3
-batch_size: 256
+batch_size: 512
 # misc
 seed: 0
 device: cuda
