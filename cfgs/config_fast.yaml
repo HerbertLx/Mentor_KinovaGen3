@@ -15,7 +15,7 @@ update_every_steps: 8
 eval_every_frames: 100000
 num_eval_episodes: 10
 # snapshot
-save_snapshot: False
+save_snapshot: True
 save_interval: 10000
 load_from_id: false
 load_id: 0
