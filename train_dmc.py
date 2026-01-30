@@ -72,7 +72,14 @@ class Workspace:
         self.cfg = cfg
         print("#"*20)
         print(f'\nworkspace: {self.work_dir}')
-        print(self.cfg)
+        for key in self.cfg:
+            print(f"self.cfg['{key}'] = {self.cfg[key]}")
+
+            if key == 'agent':
+                for agent_key in self.cfg['agent']:
+                    print(f"self.cfg['agent']['{agent_key}'] = {self.cfg['agent'][agent_key]}")
+
+        print()
         
         self.last_save_step = -9999 # 用于记录上一次保存 Snapshot 的步数
         
