@@ -73,11 +73,16 @@ class Workspace:
         print("#"*20)
         print(f'\nworkspace: {self.work_dir}')
         for key in self.cfg:
-            print(f"self.cfg['{key}'] = {self.cfg[key]}")
 
             if key == 'agent':
                 for agent_key in self.cfg['agent']:
-                    print(f"self.cfg['agent']['{agent_key}'] = {self.cfg['agent'][agent_key]}")
+                    if agent_key == 'obs_shape' or agent_key == 'action_shape':
+                        print(f"self.cfg['agent']['{agent_key}'] = ")
+                    else:
+                        print(f"self.cfg['agent']['{agent_key}'] = {self.cfg['agent'][agent_key]}")
+            else:
+                print(f"self.cfg['{key}'] = {self.cfg[key]}")
+
 
         print()
         
