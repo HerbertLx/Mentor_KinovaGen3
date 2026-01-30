@@ -20,7 +20,8 @@ save_interval: 100000
 load_from_id: false
 load_id: 0
 # wandb
-use_wandb: true
+use_wandb: False
+# use_wandb: true
 # replay buffer
 replay_buffer_size: 1000000
 replay_buffer_num_workers: 4
