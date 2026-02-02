@@ -225,43 +225,107 @@ class MetersGroup(object):
 
 
 class Logger(object):
+    """
+    实验日志总管理类。
+    
+    主要功能:
+        1. 统一管理训练（train）和评估（eval）两套指标系统。
+        2. 协调多种后端：CSV 文件、TensorBoard (SummaryWriter) 和 WandB。
+        3. 提供上下文管理器接口，简化实验主循环的代码量。
+    """
     def __init__(self, log_dir, use_tb=False, use_wandb=False):
+        """
+        初始化 Logger 实例。
+
+        参数说明:
+            log_dir (Path): 日志存储的总目录。
+            use_tb (bool): 是否启用 TensorBoard 记录。
+            use_wandb (bool): 是否启用 WandB 记录。
+        """
         self._log_dir = log_dir
+        
+        # 初始化训练指标组：负责记录所有以 'train' 开头的指标
         self._train_mg = MetersGroup(log_dir / 'train.csv',
                                      formating=COMMON_TRAIN_FORMAT,
                                      use_wandb=use_wandb)
+        
+        # 初始化评估指标组：负责记录所有以 'eval' 开头的指标
         self._eval_mg = MetersGroup(log_dir / 'eval.csv',
                                     formating=COMMON_EVAL_FORMAT,
                                     use_wandb=use_wandb)
+        
+        # 如果启用 TensorBoard，初始化 SummaryWriter
         if use_tb:
             self._sw = SummaryWriter(str(log_dir / 'tb'))
         else:
             self._sw = None
+            
         self.use_wandb = use_wandb
 
     def _try_sw_log(self, key, value, step):
+        """
+        内部辅助函数：尝试向 TensorBoard 写入标量数据。
+        """
         if self._sw is not None:
             self._sw.add_scalar(key, value, step)
 
     def log(self, key, value, step):
+        """
+        核心记录函数：将单个指标存入系统。
+
+        参数说明:
+            key (str): 指标键名，必须以 'train' 或 'eval' 开头（例如 'train/loss'）。
+            value (any): 指标数值，支持 torch.Tensor 或普通数值。
+            step (int): 当前全局步数。
+        """
+        # 强制性规范：确保日志类别明确
         assert key.startswith('train') or key.startswith('eval')
+        
+        # 如果传入的是 PyTorch 张量，将其转为 Python 标量以便记录
         if type(value) == torch.Tensor:
             value = value.item()
+            
+        # 1. 记录到 TensorBoard（如果可用）
         self._try_sw_log(key, value, step)
+        
+        # 2. 根据前缀，选择对应的数据管理器（MetersGroup）进行累加
         mg = self._train_mg if key.startswith('train') else self._eval_mg
         mg.log(key, value)
 
     def log_metrics(self, metrics, step, ty):
+        """
+        批量记录指标。
+
+        参数说明:
+            metrics (dict): 包含多个键值对的字典（例如 {'loss': 0.1, 'acc': 0.9}）。
+            step (int): 当前步数。
+            ty (str): 类别前缀，'train' 或 'eval'。
+        """
         for key, value in metrics.items():
+            # 自动拼接前缀并转发给 log 函数
             self.log(f'{ty}/{key}', value, step)
 
     def dump(self, step, ty=None):
+        """
+        清算函数：将缓存中的平均指标清空并输出到控制台、CSV 和 WandB。
+
+        参数说明:
+            step (int): 当前步数。
+            ty (str): 指定清算哪一类指标。None 表示全部清算，'train' 或 'eval' 表示指定清算。
+        """
         if ty is None or ty == 'eval':
             self._eval_mg.dump(step, 'eval')
         if ty is None or ty == 'train':
             self._train_mg.dump(step, 'train')
 
     def log_and_dump_ctx(self, step, ty):
+        """
+        上下文管理器工厂函数。
+        
+        逻辑说明:
+            返回一个 LogAndDumpCtx 实例，用于支持 'with' 语法，
+            实现自动化的 log 和随后的 dump 操作。
+        """
         return LogAndDumpCtx(self, step, ty)
 
 
