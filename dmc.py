@@ -118,9 +118,29 @@ class FrameStackWrapper(dm_env.Environment):
 
 
 class ActionDTypeWrapper(dm_env.Environment):
+    """
+    环境动作数据类型转换包装器。
+    
+    主要功能:
+        用于修改环境接收动作时的预期数据类型（dtype）。它在不改变物理环境逻辑的前提下，
+        负责在智能体（Agent）和环境（Environment）之间进行数据类型的强制转换。
+    
+    设计模式: 
+        装饰器模式。它持有原始环境的引用，并模仿原始环境的行为。
+    """
     def __init__(self, env, dtype):
+        """
+        初始化包装器。
+
+        参数说明:
+            env (dm_env.Environment): 被包装的原始环境实例。
+            dtype (numpy.dtype): 目标数据类型（例如 np.float32）。
+        """
         self._env = env
+        # 获取原始环境的动作规格（包含动作的维度、最大值、最小值等信息）
         wrapped_action_spec = env.action_spec()
+        
+        # 内部逻辑: 重新定义一个新的动作规格，除了数据类型改为指定的 dtype，其余参数保持不变
         self._action_spec = specs.BoundedArray(wrapped_action_spec.shape,
                                                dtype,
                                                wrapped_action_spec.minimum,
@@ -128,19 +148,53 @@ class ActionDTypeWrapper(dm_env.Environment):
                                                'action')
 
     def step(self, action):
+        """
+        执行环境步进。
+
+        输入参数:
+            action (numpy.ndarray): 智能体输出的动作。
+            
+        内部逻辑:
+            INFO: 在将动作传递给原始环境之前，使用 .astype() 将其强制转换为原始环境所要求的类型。
+            这是解决数据类型不匹配报错的关键步骤。
+        
+        输出:
+            TimeStep: 包含观测、奖励、折扣系数的元组。
+        """
+        # 强制类型转换，例如从 float32 转回原始的 float64
         action = action.astype(self._env.action_spec().dtype)
         return self._env.step(action)
 
     def observation_spec(self):
+        """
+        返回环境的观测规格。直接转发给原始环境，不作修改。
+        """
         return self._env.observation_spec()
 
     def action_spec(self):
+        """
+        返回修改后的动作规格。
+        
+        输出:
+            specs.BoundedArray: 告知智能体，现在环境接收的是新的数据类型。
+        """
         return self._action_spec
 
     def reset(self):
+        """
+        重置环境。直接调用原始环境的重置方法。
+        """
         return self._env.reset()
 
     def __getattr__(self, name):
+        """
+        属性转发魔法方法。
+        
+        内部逻辑:
+            如果外部访问的属性或方法在这个类里没定义（比如 env.physics），
+            Python 会通过这个方法去原始环境 (self._env) 里查找。
+            这确保了包装后的环境依然可以使用原始环境的所有功能。
+        """
         return getattr(self._env, name)
 
 
