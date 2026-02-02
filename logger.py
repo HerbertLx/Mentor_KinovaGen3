@@ -33,12 +33,6 @@ class AverageMeter(object):
         return self._sum / max(1, self._count)
 
 
-import csv
-import datetime
-import wandb
-from collections import defaultdict
-from termcolor import colored
-
 class MetersGroup(object):
     """
     实验指标组合管理类。
@@ -272,16 +266,62 @@ class Logger(object):
 
 
 class LogAndDumpCtx:
+    """
+    日志记录与自动清空（Dump）上下文管理器。
+    
+    主要功能:
+        通过 Python 的 contextmanager 协议（__enter__ 和 __exit__），
+        确保在一个逻辑块（如一个训练回合）结束时，日志能够自动被写入磁盘/显示。
+        它通过 __call__ 方法将自身变成一个可调用对象，简化了记录数据的语法。
+    """
+
     def __init__(self, logger, step, ty):
-        self._logger = logger
-        self._step = step
-        self._ty = ty
+        """
+        初始化上下文管理器。
+
+        参数说明:
+            logger (Logger): 全局 Logger 对象的引用。
+            step (int): 当前的全局训练帧数或步数（global_step）。
+            ty (str): 日志类型前缀，通常为 'train' 或 'eval'。
+        """
+        self._logger = logger  # 持有 Logger 的引用，以便调用其方法
+        self._step = step      # 记录当前的时间戳/步数
+        self._ty = ty          # 记录数据的业务分类（训练还是评估）
 
     def __enter__(self):
+        """
+        进入 'with' 语句块时的逻辑。
+        
+        WARNING: 必须返回 self 才能在 'as' 后面的变量中使用该实例。
+        
+        返回:
+            LogAndDumpCtx: 实例自身。
+        """
         return self
 
     def __call__(self, key, value):
+        """
+        让实例可以像函数一样被直接调用。
+        例如：log('reward', 10)
+        
+        内部逻辑:
+            1. 自动拼接前缀：将 key 转化为 'train/reward' 这种完整路径。
+            2. 转发调用：将处理好的 key、value 和 step 传给真正的 logger.log 函数。
+            
+        参数说明:
+            key (str): 指标名称。
+            value (any): 指标数值。
+        """
         self._logger.log(f'{self._ty}/{key}', value, self._step)
 
     def __exit__(self, *args):
+        """
+        退出 'with' 语句块时的逻辑（无论是否发生异常都会执行）。
+        
+        INFO: 这是该类的核心价值，它自动触发了 dump 操作，
+        保证了本周期内记录的所有指标被统一输出并清空缓存。
+        
+        参数说明:
+            *args: 包含异常类型、异常值、追溯信息（如果有）。
+        """
         self._logger.dump(self._step, self._ty)
