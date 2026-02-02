@@ -31,12 +31,31 @@ class eval_mode:
             model.train(state)
         return False
 
-
 def set_seed_everywhere(seed):
+    """
+    配置全局随机种子以确保实验的可复现性。
+    
+    该函数通过统一设置所有常用库（标准库、NumPy、PyTorch）的随机种子，
+    尽可能消除程序运行中的随机扰动。
+    
+    输入参数：
+        seed (int): 随机种子数值。相同的种子在相同的硬件环境下会产生相同的伪随机序列。
+        
+    输出：
+        无。直接修改全局状态。
+    """
+    # 设置 PyTorch 在 CPU 上生成随机数的种子
     torch.manual_seed(seed)
+    
+    # 如果检测到 GPU 环境，则为所有可用的 GPU 设置种子
     if torch.cuda.is_available():
+        # manual_seed_all 会处理多显卡情况，确保各张显卡行为一致
         torch.cuda.manual_seed_all(seed)
+    
+    # 设置 NumPy 的全局随机种子（常用于数据处理和 Buffer 采样）
     np.random.seed(seed)
+    
+    # 设置 Python 标准库 random 模块的种子（用于简单采样或 shuffle）
     random.seed(seed)
 
 
