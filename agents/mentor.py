@@ -214,58 +214,95 @@ class Encoder(nn.Module):
             self.apply(utils.weight_init)
 
     def forward(self, x):
+        """
+        前向传播，将输入图像批次编码为一维特征向量。
+
+        参数:
+            x (torch.Tensor): 输入张量，形状为 [B, C, H, W]，
+                              其中 C 与初始化时的 obs_shape[0] 一致。
+
+        返回:
+            torch.Tensor: 编码后的特征，形状为 [B, repr_dim]。
+        """
+        # 将像素从 [0, 255] 归一化到约 [-0.5, 0.5]，便于网络训练稳定
         x = x / 255.0 - 0.5
         
         if self.encoder_type == 'scratch':
-            h = self.convnet(x) # shape: d * h * w
+            # 直接用自建卷积网络抽取特征，输出形状约为 [B, 32, 35, 35]
+            h = self.convnet(x)  # shape: [B, D, H', W']
+            # 展平成一维向量 [B, 32 * 35 * 35]，与 self.repr_dim 对齐
             h = h.view(h.shape[0], -1)
             return h
-
+        
         if self.encoder_type == 'spawnnet':
+            # batch size
             bsz = x.shape[0]
+            # 通道数除以 9（3 通道 * 3 时间步）得到相机数量
             n_camera = x.shape[1] // 9
+            # 先将通道维还原为 [B * n_camera * time_steps, 3, H, W] 的单图像形式
             x = x.view(-1, 3, 3, x.shape[2], x.shape[3]).view(-1, 3, x.shape[2], x.shape[3])
             
+            # 预训练分支使用 detach 以避免梯度回流（当 resnet_fix=True 时尤其有效）
             hidden_pretrained = x.detach()
+            # scratch 分支保留梯度
             hidden_scratch = x
             
-            # Layer 1
+            # Layer 1: 预训练 ResNet 仅前向到 layer1
             with torch.no_grad():
                 for name, module in self.pretrained_resnet._modules.items():
                     hidden_pretrained = module(hidden_pretrained)
-                    if name == "layer1": break
+                    if name == "layer1":  # 到 layer1 停止
+                        break
+            # scratch 分支通过自建的第一段卷积
             hidden_scratch = self.scratch_convnet_layer1(hidden_scratch)
             
+            # 使用 1x1 卷积对预训练特征做通道变换，并加 ReLU 非线性
             X_pretrained = torch.nn.functional.relu(self.oneXone_conv_layer1(hidden_pretrained))
+            # 按通道拼接预训练特征与 scratch 特征，预训练特征乘以 pretrained_factor 控制其权重
             X_scratch = torch.cat([X_pretrained * self.pretrained_factor, hidden_scratch], dim=1)
+            # 通过第一个残差块做特征变换，并加上残差提升表达能力
             X_scratch = X_scratch + self.residual_conv_layer1(X_scratch)
             hidden_scratch = X_scratch
             
-            # Layer 2
+            # Layer 2: 继续让预训练分支前向到 layer2
             with torch.no_grad():
                 flag = False
                 for name, module in self.pretrained_resnet._modules.items():
                     if flag:
                         hidden_pretrained = module(hidden_pretrained)
-                        if name == "layer2": break
+                        if name == "layer2":  # 到 layer2 停止
+                            break
                     else:
-                        if name == "layer1": flag = True
+                        if name == "layer1":
+                            flag = True
+            # scratch 分支通过第二段卷积，进一步下采样和提取高层特征
             hidden_scratch = self.scratch_convnet_layer2(hidden_scratch)
             
+            # 再次用 1x1 卷积调整预训练特征通道数
             X_pretrained = torch.nn.functional.relu(self.oneXone_conv_layer2(hidden_pretrained))
+            # 预训练特征与 scratch 特征再次融合
             X_scratch = torch.cat([X_pretrained * self.pretrained_factor, hidden_scratch], dim=1)
+            # 第二个残差块，输出通道约为 128
             X_scratch = X_scratch + self.residual_conv_layer2(X_scratch)
             hidden_scratch = X_scratch
             
-            # hidden_scratch: n_camera * bsz, 128, 11, 11
+            # 此时 hidden_scratch 形状为: [n_camera * B * time_steps, 128, 11, 11]
             time_steps = 3
-            X = hidden_scratch.view(-1, time_steps, hidden_scratch.shape[1], hidden_scratch.shape[2], hidden_scratch.shape[3])
+            # 重新组织维度: [n_camera * B, time_steps, C, H, W]
+            X = hidden_scratch.view(-1, time_steps, hidden_scratch.shape[1],
+                                    hidden_scratch.shape[2], hidden_scratch.shape[3])
+            # 取当前时刻（去掉最早一个时间步），形状 [n_camera * B, time_steps-1, C, H, W]
             X_current = X[:, 1:, ...]
+            # 使用差分构造“运动特征”：当前帧减去前一帧（前一帧梯度截断）
             X_previous = X_current - X[:, :time_steps - 1, ...].detach()
+            # 将当前特征与差分特征在时间维拼接，得到 2 * (time_steps-1) 个时间通道
             X = torch.cat([X_current, X_previous], dim=1)
+            # 将相机与时间维展开回 batch 维度，得到 [B, 4 * n_camera * 128, 11, 11]
             X = X.view(bsz, -1, X.shape[3], X.shape[4])
+            # 再展平成一维向量 [B, feature_dim]
             X = X.view(bsz, -1)
             
+            # 通过输出层 (LayerNorm + Linear) 映射到固定维度 repr_dim
             return self.output_layer(X)
             
 
