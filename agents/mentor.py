@@ -87,49 +87,130 @@ class RandomShiftsAug(nn.Module):
 
 
 class Encoder(nn.Module):
-    def __init__(self, obs_shape, encoder_type, resnet_fix, pretrained_factor): # encoder_type in ['scratch', 'spawnnet']
-        super().__init__()
-
-        assert len(obs_shape) == 3
-
-        self.encoder_type = encoder_type
-        self.pretrained_factor = pretrained_factor
+    """
+    视觉编码器，将输入图像观测编码为一维特征向量。
+    
+    当前支持两种编码模式：
+    - 'scratch':  使用从零开始训练的简单卷积网络。
+    - 'spawnnet': 结合预训练 ResNet18 与自建卷积网络的“产卵网络”结构，用于多相机、多时间步输入。
+    """
+    
+    def __init__(self, obs_shape, encoder_type, resnet_fix, pretrained_factor):
+        """
+        初始化编码器。
         
+        参数说明:
+            obs_shape (tuple[int, int, int]):
+                观测张量的形状 (C, H, W)。
+                - 对于 'scratch'：一般为单相机、单时间步的图像，例如 (3, 84, 84)。
+                - 对于 'spawnnet'：一般为多相机、多时间步按通道拼接后的图像，
+                  例如 3 * n_camera * time_steps 通道。
+            encoder_type (str):
+                编码器类型，必须为:
+                - 'scratch'  : 纯自建卷积网络。
+                - 'spawnnet' : 使用预训练 ResNet18 + 自建卷积网络的混合结构。
+            resnet_fix (bool):
+                仅在 'spawnnet' 模式下有效。
+                - True  : 冻结预训练 ResNet18 的所有参数，仅训练自建卷积层和后续层。
+                - False : 允许微调 ResNet18。
+            pretrained_factor (float):
+                仅在 'spawnnet' 模式下使用。
+                用于缩放 ResNet 分支的特征，在与 scratch 分支特征拼接/融合时控制预训练特征的权重。
+        
+        属性:
+            encoder_type (str): 当前编码器使用的模式。
+            repr_dim (int): 编码后的特征向量维度，后续 Actor/Critic 等网络会依赖此值。
+        """
+        super().__init__()
+        
+        # 基本形状检查：观测必须为 (C, H, W) 三维
+        assert len(obs_shape) == 3, f"obs_shape 必须为 (C, H, W)，但得到 {obs_shape}"
+        
+        # 保存编码器配置
+        self.encoder_type = encoder_type  # 编码器类型：'scratch' 或 'spawnnet'
+        self.pretrained_factor = pretrained_factor  # 预训练分支特征缩放因子
+        
+        # 确保传入的 encoder_type 合法
         assert encoder_type in ['scratch', 'spawnnet']
                 
         if self.encoder_type == 'scratch':
+            # 在 scratch 模式下，最终得到的特征维度为 32 通道、空间尺寸约为 35x35
+            # 这里直接把展平后的维度保存下来，供后续网络使用
             self.repr_dim = 32 * 35 * 35
-            self.convnet = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
-                                        nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                        nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                        nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                        nn.ReLU())
+            # 简单的 4 层卷积网络：
+            # - 第 1 层 stride=2，用于下采样
+            # - 其余层 stride=1，保持空间尺寸，逐步提取特征
+            self.convnet = nn.Sequential(
+                nn.Conv2d(obs_shape[0], 32, 3, stride=2),  # 输入通道为 obs_shape[0]，输出 32 通道
+                nn.ReLU(),
+                nn.Conv2d(32, 32, 3, stride=1),
+                nn.ReLU(),
+                nn.Conv2d(32, 32, 3, stride=1),
+                nn.ReLU(),
+                nn.Conv2d(32, 32, 3, stride=1),
+                nn.ReLU()
+            )
+            # 使用统一的初始化策略初始化所有参数
             self.apply(utils.weight_init)
         
         if self.encoder_type == 'spawnnet':
+            # 预训练的 ResNet18 作为“教师”特征提取器，只用其前几层特征
             self.pretrained_resnet = models.resnet18(pretrained=True)
             if resnet_fix:
+                # 如果选择固定预训练网络，则不更新其参数
                 for params in self.pretrained_resnet.parameters():
                     params.requires_grad = False
-            # pretrained shape: 64 * 21 * 21 -> 128 * 11 * 11
+            # 预训练分支大致输出形状: 64 * 21 * 21 -> 128 * 11 * 11（经过后续卷积）
             
-            self.scratch_convnet_layer1 = nn.Sequential(nn.Conv2d(3, 16, 3, stride=2, padding=1), # shape: 84 * 84 -> 42 * 42
-                                        nn.ReLU(), nn.Conv2d(16, 32, 3, stride=2, padding=1), # shape: 42 * 42 -> 21 * 21
-                                        )
-            self.scratch_convnet_layer2 = nn.Sequential(nn.ReLU(), nn.Conv2d(64, 64, 3, stride=1, padding=1), # shape: 21 * 21 -> 21 * 21
-                                        nn.ReLU(), nn.Conv2d(64, 64, 3, stride=2, padding=1), # shape: 21 * 21 -> 11 * 11
-                                        )
-            # scratch shape: 32 * 21 * 21 -> 64 * 11 * 11
-            self.oneXone_conv_layer1 = nn.Sequential(nn.Conv2d(64, 32, 1, stride=1))
-            self.oneXone_conv_layer2 = nn.Sequential(nn.Conv2d(128, 64, 1, stride=1))
-            self.residual_conv_layer1 = nn.Sequential(nn.Conv2d(64, 32, 3, stride=1, padding=1),
-                                               nn.ReLU(), nn.Conv2d(32, 64, 3, stride=1, padding=1), nn.ReLU())
-            self.residual_conv_layer2 = nn.Sequential(nn.Conv2d(128, 64, 3, stride=1, padding=1),
-                                               nn.ReLU(), nn.Conv2d(64, 128, 3, stride=1, padding=1), nn.ReLU())
+            # scratch 分支的第一段卷积：从原始图像中提取低层视觉特征
+            self.scratch_convnet_layer1 = nn.Sequential(
+                nn.Conv2d(3, 16, 3, stride=2, padding=1),  # 84 * 84 -> 42 * 42
+                nn.ReLU(),
+                nn.Conv2d(16, 32, 3, stride=2, padding=1),  # 42 * 42 -> 21 * 21
+            )
+            # scratch 分支的第二段卷积：在与预训练特征融合后，进一步提取高层特征
+            self.scratch_convnet_layer2 = nn.Sequential(
+                nn.ReLU(),
+                nn.Conv2d(64, 64, 3, stride=1, padding=1),  # 21 * 21 -> 21 * 21
+                nn.ReLU(),
+                nn.Conv2d(64, 64, 3, stride=2, padding=1),  # 21 * 21 -> 11 * 11
+            )
+            # scratch 分支形状从 32 * 21 * 21 -> 64 * 11 * 11
+            # 下面是一系列 1x1 卷积和残差块，用于与预训练特征对齐和融合
+            self.oneXone_conv_layer1 = nn.Sequential(
+                nn.Conv2d(64, 32, 1, stride=1)  # 将预训练特征通道压缩到 32
+            )
+            self.oneXone_conv_layer2 = nn.Sequential(
+                nn.Conv2d(128, 64, 1, stride=1)  # 再次调整通道数，便于与 scratch 分支融合
+            )
+            # 第一个残差块：在 64 通道上堆叠两个 3x3 卷积
+            self.residual_conv_layer1 = nn.Sequential(
+                nn.Conv2d(64, 32, 3, stride=1, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(32, 64, 3, stride=1, padding=1),
+                nn.ReLU()
+            )
+            # 第二个残差块：在 128 通道上堆叠两个 3x3 卷积
+            self.residual_conv_layer2 = nn.Sequential(
+                nn.Conv2d(128, 64, 3, stride=1, padding=1),
+                nn.ReLU(),
+                nn.Conv2d(64, 128, 3, stride=1, padding=1),
+                nn.ReLU()
+            )
             
+            # feature_dim 代表展开前的总特征维度：
+            # - obs_shape[0] // 9 约等于相机数量（每个相机有 3 * time_steps 通道，这里 time_steps=3）
+            # - 乘以 4 是因为在时间上拼接了 current / previous 差分等 4 份特征
+            # - 128 * 11 * 11 是每一份特征的空间维度和通道数
             feature_dim = obs_shape[0]//9 * 4 * 128 * 11 * 11
+            # 编码器输出的最终维度固定为 1024，方便下游网络设计
             self.repr_dim = 1024
-            self.output_layer = nn.Sequential(nn.LayerNorm(feature_dim), nn.Linear(feature_dim, self.repr_dim))
+            # 输出层：先做 LayerNorm 再做线性变换，将高维特征压缩到 repr_dim
+            self.output_layer = nn.Sequential(
+                nn.LayerNorm(feature_dim),
+                nn.Linear(feature_dim, self.repr_dim)
+            )
+            # 同样使用统一的初始化方法
             self.apply(utils.weight_init)
 
     def forward(self, x):
