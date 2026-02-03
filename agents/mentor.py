@@ -12,33 +12,74 @@ import numpy as np
 import torchvision.models as models
 
 class RandomShiftsAug(nn.Module):
+    """
+    随机平移数据增强类。
+    
+    主要功能:
+        对输入的图像进行随机的小幅度平移。
+        这种增强方式在基于视觉的强化学习（如 DrQ-v2）中非常有效，
+        能显著提升智能体对位置变化的鲁棒性。
+    """
     def __init__(self, pad):
+        """
+        初始化增强器。
+
+        参数说明:
+            pad (int): 填充的像素大小。例如 pad=4 表示图像可以上下左右最多移动 4 个像素。
+        """
         super().__init__()
         self.pad = pad
 
     def forward(self, x):
+        """
+        前向传播逻辑：执行随机平移。
+
+        输入参数:
+            x (torch.Tensor): 输入图像张量，维度为 [n, c, h, w]。
+        """
         n, c, h, w = x.size()
+        # 内部逻辑: 这是一个约束，要求输入的图像必须是正方形
         assert h == w
+        
+        # 1. 图像填充 (Padding)
+        # 将图像四周各填充 self.pad 个像素。'replicate' 模式会重复边界像素的值。
+        # 填充后的维度变为 [n, c, h+2*pad, w+2*pad]
         padding = tuple([self.pad] * 4)
         x = F.pad(x, padding, 'replicate')
+        
+        # 2. 生成基础网格 (Base Grid)
+        # eps 是网格坐标的单位跨度
         eps = 1.0 / (h + 2 * self.pad)
+        # 创建一个从 -1 到 1 的线性空间坐标，代表归一化后的像素位置
         arange = torch.linspace(-1.0 + eps,
                                 1.0 - eps,
                                 h + 2 * self.pad,
                                 device=x.device,
-                                dtype=x.dtype)[:h]
+                                dtype=x.dtype)[:h]  # 只取前 h 个元素，为后续裁剪做准备
+        
+        # 将一维坐标扩展为二维坐标网格
         arange = arange.unsqueeze(0).repeat(h, 1).unsqueeze(2)
         base_grid = torch.cat([arange, arange.transpose(1, 0)], dim=2)
+        # 此时 base_grid 的维度为 [1, h, w, 2]，包含了标准的采样坐标
         base_grid = base_grid.unsqueeze(0).repeat(n, 1, 1, 1)
 
+        # 3. 生成随机偏移量 (Random Shift)
+        # 为 Batch 中的每张图片随机生成一个整数偏移量 [0, 2*pad]
         shift = torch.randint(0,
                               2 * self.pad + 1,
                               size=(n, 1, 1, 2),
                               device=x.device,
                               dtype=x.dtype)
+        # 将像素单位的整数偏移转换为 [-1, 1] 范围内的浮点偏移量
         shift *= 2.0 / (h + 2 * self.pad)
 
+        # 4. 合成最终采样网格
+        # 基础网格 + 随机偏移 = 移动后的采样网格
         grid = base_grid + shift
+        
+        # 5. 空间重采样 (Spatial Resampling)
+        # 使用 F.grid_sample 根据计算好的网格从填充后的图像 x 中采样。
+        # 效果相当于在填充后的图像上随机切出了一个 h x w 的窗口。
         return F.grid_sample(x,
                              grid,
                              padding_mode='zeros',
